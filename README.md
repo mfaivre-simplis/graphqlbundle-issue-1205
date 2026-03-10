@@ -2,7 +2,7 @@
 
 > Access denied / Internal server error when using `#[GQL\Provider]` + `#[GQL\Query]` with PHP attributes
 
-**Bundle version:** `overblog/graphql-bundle` v1.9.0
+**Bundle versions affected:** `overblog/graphql-bundle` v1.7.0 and v1.9.0 (same code path)
 **Symfony version:** 6.4
 **Issue:** https://github.com/overblog/GraphQLBundle/issues/1205
 
@@ -99,7 +99,9 @@ $services->get('container')->get("App\\GraphQL\\QueryProvider")
 This requires the service to be public. The fix marks the service public during the
 pre-parse phase, consistent with how the bundle itself makes other services public.
 
-**Patch:** [`fix-provider-service-visibility.patch`](./fix-provider-service-visibility.patch)
+**Patches** (identical diff, works on both v1.7.0 and v1.9.0):
+- [`fix-provider-service-visibility-1.7.0.patch`](./fix-provider-service-visibility-1.7.0.patch)
+- [`fix-provider-service-visibility.patch`](./fix-provider-service-visibility.patch) (v1.9.0)
 
 ```diff
  case $classMetadata instanceof Metadata\Provider:
