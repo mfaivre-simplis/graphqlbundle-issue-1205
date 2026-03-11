@@ -1,9 +1,9 @@
 overblog_graphql:
     definitions:
         schema:
-            query: Query
+            query: RootQuery
         mappings:
             types:
                 -   type: attribute
-                    dir: '%kernel.project_dir%/src/GraphQL'
+                    dir: '%kernel.project_dir%/src/UI/GraphQL'
                     suffix: ~

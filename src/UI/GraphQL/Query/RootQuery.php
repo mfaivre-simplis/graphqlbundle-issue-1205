@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\GraphQL;
+namespace App\UI\GraphQL\Query;
 
 use Overblog\GraphQLBundle\Annotation as GQL;
 
-#[GQL\Type(name: 'Query')]
-class QueryType
+#[GQL\Type]
+class RootQuery
 {
 }

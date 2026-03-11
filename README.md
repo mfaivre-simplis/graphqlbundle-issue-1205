@@ -1,8 +1,8 @@
 # Reproduction: overblog/GraphQLBundle #1205
 
-> Access denied / Internal server error when using `#[GQL\Provider]` + `#[GQL\Query]` with PHP attributes
+> `#[GQL\Access('isAnonymous()')]` on a Provider always returns "Access denied to this field"
 
-**Bundle versions affected:** `overblog/graphql-bundle` v1.7.0 and v1.9.0 (same code path)
+**Bundle versions affected:** `overblog/graphql-bundle` v1.7.0 and v1.9.0
 **Symfony version:** 6.4
 **Issue:** https://github.com/overblog/GraphQLBundle/issues/1205
 
@@ -10,19 +10,34 @@
 
 ## The bug
 
-When declaring GraphQL query fields using `#[GQL\Provider]` + `#[GQL\Query]` (the PHP attribute way), the field resolves with an internal error at runtime:
+When declaring a GraphQL query field via `#[GQL\Provider]` + `#[GQL\Access('isAnonymous()')]`,
+every request returns "Access denied to this field" — even for fully unauthenticated requests.
 
+```php
+#[GQL\Provider]
+#[GQL\Access('isAnonymous()')]
+final readonly class ConnectedUserQuery
+{
+    #[GQL\Query(name: 'connectedUser', type: 'Boolean!')]
+    #[GQL\Access('isAnonymous()')]
+    public function __invoke(): bool
+    {
+        return true;
+    }
+}
 ```
-"App\GraphQL\QueryProvider" service or alias has been removed or inlined when
-the container was compiled. You should either make it public, or stop using
-the container directly and use dependency injection instead.
-```
 
-The generated type code calls `$container->get('App\GraphQL\QueryProvider')` directly,
-but Symfony makes services **private by default** since Symfony 4. The bundle never marks
-`#[GQL\Provider]` classes as public in the container.
+**Root cause:** `BaseSecurity::isAnonymous()` calls `isGranted('IS_AUTHENTICATED_ANONYMOUSLY')`.
+In Symfony 6.x, `IS_AUTHENTICATED_ANONYMOUSLY` was **removed from `AuthenticatedVoter`** — it is
+no longer in `supportsAttribute()`. No voter handles it, so the access decision manager abstains
+and returns `false`. Therefore `isAnonymous()` always returns `false` in Symfony 6.x regardless
+of whether the user is authenticated.
 
-The schema dumps correctly (`graphql:dump-schema` shows the field) but any actual query fails.
+The correct replacement since Symfony 5.4 is `PUBLIC_ACCESS`, which always grants access.
+
+> **Note:** this reproduction also requires setting the Provider service to `public: true`
+> in `services.yaml` as a workaround for a separate (known) issue where the bundle fetches
+> provider services via `$container->get()` at runtime.
 
 ---
 
@@ -34,81 +49,67 @@ php composer install
 
 ---
 
-## Reproduce the bug
+## Reproduce the bug (before applying the fix)
+
+Revert the patch first:
 
 ```bash
-# Clear cache (uses the original, unpatched bundle)
+patch -R -p1 -d vendor/overblog/graphql-bundle < fix-is-anonymous-symfony6.patch
 php bin/console cache:clear
 
-# Start a dev server
+# Start dev server
 php -S 127.0.0.1:8099 -t public public/index.php &
 
-# Query — this will fail
+# Query — returns "Access denied to this field"
 curl -s -X POST http://127.0.0.1:8099/graphql/ \
   -H "Content-Type: application/json" \
-  -d '{"query":"{ hello }"}' | python3 -m json.tool
+  -d '{"query":"{ connectedUser }"}' | python3 -m json.tool
 ```
 
-**Expected:**
-```json
-{"data": {"hello": "Hello, world!"}}
-```
-
-**Actual:**
+**Actual (buggy) response:**
 ```json
 {
-    "errors": [{
-        "message": "Internal server Error",
-        "extensions": {
-            "debugMessage": "The \"App\\GraphQL\\QueryProvider\" service or alias has been removed or inlined when the container was compiled..."
-        }
-    }]
+    "extensions": {
+        "warnings": [{
+            "message": "Access denied to this field.",
+            "path": ["connectedUser"]
+        }]
+    }
 }
+```
+
+---
+
+## Apply the fix
+
+```bash
+patch -p1 -d vendor/overblog/graphql-bundle < fix-is-anonymous-symfony6.patch
+php bin/console cache:clear
+
+curl -s -X POST http://127.0.0.1:8099/graphql/ \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ connectedUser }"}' | python3 -m json.tool
+```
+
+**Expected (fixed) response:**
+```json
+{"data": {"connectedUser": true}}
 ```
 
 ---
 
 ## The fix
 
-Apply the provided patch:
-
-```bash
-patch -p1 -d vendor/overblog/graphql-bundle < fix-provider-service-visibility.patch
-
-php bin/console cache:clear
-
-curl -s -X POST http://127.0.0.1:8099/graphql/ \
-  -H "Content-Type: application/json" \
-  -d '{"query":"{ hello }"}' | python3 -m json.tool
-# {"data": {"hello": "Hello, world!"}}
-```
-
----
-
-## Root cause
-
-In `MetadataParser::classMetadatasToGQLConfiguration()`, when a `#[GQL\Provider]` class is
-found during the pre-parse phase, the bundle adds it to `self::$providers` but never marks
-its Symfony service definition as public.
-
-The generated resolver code for provider fields always calls:
-```php
-$services->get('container')->get("App\\GraphQL\\QueryProvider")
-```
-
-This requires the service to be public. The fix marks the service public during the
-pre-parse phase, consistent with how the bundle itself makes other services public.
-
-**Patches** (identical diff, works on both v1.7.0 and v1.9.0):
-- [`fix-provider-service-visibility-1.7.0.patch`](./fix-provider-service-visibility-1.7.0.patch)
-- [`fix-provider-service-visibility.patch`](./fix-provider-service-visibility.patch) (v1.9.0)
+**File:** `src/Security/Security.php` — same change applies to both v1.7.0 and v1.9.0.
 
 ```diff
- case $classMetadata instanceof Metadata\Provider:
-     if ($preProcess) {
-         self::$providers[] = ['reflectionClass' => $reflectionClass, 'metadata' => $classMetadata];
-+        if ($container->hasDefinition($reflectionClass->getName())) {
-+            $container->findDefinition($reflectionClass->getName())->setPublic(true);
-+        }
-     }
+ public function isAnonymous(): bool
+ {
+-    return $this->isGranted('IS_AUTHENTICATED_ANONYMOUSLY');
++    // IS_AUTHENTICATED_ANONYMOUSLY was removed from AuthenticatedVoter in Symfony 6.x.
++    // PUBLIC_ACCESS (added in Symfony 5.4) is the correct replacement and always grants access.
++    return $this->isGranted(Kernel::VERSION_ID >= 60000 ? 'PUBLIC_ACCESS' : 'IS_AUTHENTICATED_ANONYMOUSLY');
+ }
 ```
+
+**Patch file:** [`fix-is-anonymous-symfony6.patch`](./fix-is-anonymous-symfony6.patch)
